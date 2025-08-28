@@ -1,79 +1,67 @@
-module lif_neuron_system (
+`timescale 1ns / 1ps
+
+module alif_neuron_single_dualleak_system (
     // System signals
     input wire clk,
     input wire reset,
     input wire enable,
+    input wire input_enable,  // Neuron operation control
     
-    // ENHANCED Input channels
-    input wire [2:0] chan_a,  
-    input wire [2:0] chan_b,  
+    // Single input channel
+    input wire [5:0] chan_a,  // 3-bit precision (single channel only)
     
     // Configuration interface
     input wire load_mode,
     input wire serial_data,
     
-    // ENHANCED Outputs
+    // Outputs
     output wire spike_out,
     output wire [6:0] v_mem_out,
     output wire params_ready
 );
 
 // Internal parameter wires
-wire [2:0] weight_a, weight_b;
-wire [1:0] leak_config;
-wire [7:0] threshold_min, threshold_max;
+wire [2:0] weight_a;
+wire [7:0] leak_rate_1, leak_rate_2;
+wire [7:0] threshold_min;
+wire [3:0] leak_cycles_1, leak_cycles_2;
 wire loader_params_ready;
 
-// ENHANCED: Additional monitoring and control signals
-reg [7:0] system_cycles;
-reg [4:0] spike_count;
-
-// Enhanced data loader instance
-lif_data_loader loader (
+// Data loader instance
+alif_neuron_single_dualleak_data_loader loader (
     .clk(clk),
     .reset(reset),
     .enable(enable),
     .serial_data_in(serial_data),
     .load_enable(load_mode),
     .weight_a(weight_a),
-    .weight_b(weight_b),
-    .leak_config(leak_config),
+    .leak_rate_1(leak_rate_1),
+    .leak_rate_2(leak_rate_2),
     .threshold_min(threshold_min),
-    .threshold_max(threshold_max),
+    .leak_cycles_1(leak_cycles_1),
+    .leak_cycles_2(leak_cycles_2),
     .params_ready(loader_params_ready)
 );
 
-// Enhanced LIF neuron instance
-lif_neuron neuron (
+// LIF neuron instance
+alif_neuron_single_dualleak_neuron neuron (
     .clk(clk),
     .reset(reset),
     .enable(enable),
+    .input_enable(input_enable),
     .chan_a(chan_a),
-    .chan_b(chan_b),
     .weight_a(weight_a),
-    .weight_b(weight_b),
-    .leak_config(leak_config),
+    .leak_rate_1(leak_rate_1),
+    .leak_rate_2(leak_rate_2),
     .threshold_min(threshold_min),
-    .threshold_max(threshold_max),
+    .leak_cycles_1(leak_cycles_1),
+    .leak_cycles_2(leak_cycles_2),
     .params_ready(loader_params_ready),
     .spike_out(spike_out),
     .v_mem_out(v_mem_out)
 );
 
-// ENHANCED: System monitoring and statistics
-always @(posedge clk) begin
-    if (reset) begin
-        system_cycles <= 8'd0;
-        spike_count <= 5'd0;
-    end else if (enable) begin
-        system_cycles <= system_cycles + 1;
-        if (spike_out) begin
-            if (spike_count < 5'd31)
-                spike_count <= spike_count + 1;
-        end
-    end
-end
-
 assign params_ready = loader_params_ready;
 
 endmodule
+

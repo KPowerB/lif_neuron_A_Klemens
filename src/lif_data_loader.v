@@ -1,4 +1,6 @@
-module lif_data_loader (
+`timescale 1ns / 1ps
+
+module alif_neuron_single_dualleak_data_loader (
     // System signals
     input wire clk,
     input wire reset,
@@ -8,78 +10,74 @@ module lif_data_loader (
     input wire serial_data_in,
     input wire load_enable,
     
-    // EXPANDED OUTPUTS - More parameters
-    output reg [2:0] weight_a,      
-    output reg [2:0] weight_b,      
-    output reg [1:0] leak_config,   
-    output reg [7:0] threshold_min, 
-    output reg [7:0] threshold_max, 
-    output reg params_ready         
+    // Outputs to LIF neuron
+    output reg [2:0] weight_a,         // w_a parameter (single channel)
+    output reg [7:0] leak_rate_1,      // primary leak rate (8-bit precision)
+    output reg [7:0] leak_rate_2,      // secondary leak rate (8-bit precision)
+    output reg [7:0] threshold_min,    // minimum threshold for adaptation
+    output reg [3:0] leak_cycles_1,    // cycles for primary leak
+    output reg [3:0] leak_cycles_2,    // cycles for secondary leak
+    output reg params_ready            // Parameters loaded and ready
 );
 
-// EXPANDED STATE MACHINE - More parameters to load
-parameter IDLE = 4'b0000;
-parameter LOAD_WA = 4'b0001;
-parameter LOAD_WB = 4'b0010;
-parameter LOAD_LEAK = 4'b0011;
-parameter LOAD_THR_MIN = 4'b0100;
-parameter LOAD_THR_MAX = 4'b0101;
-parameter LOAD_EXTRA1 = 4'b0110;  // Additional parameter slots
-parameter LOAD_EXTRA2 = 4'b0111;  // for future expansion
-parameter READY = 4'b1000;
+// State machine for parameter loading
+parameter IDLE = 3'b000;
+parameter LOAD_WA = 3'b001;
+parameter LOAD_LEAK_RATE_1 = 3'b010;
+parameter LOAD_LEAK_RATE_2 = 3'b011;
+parameter LOAD_THRESHOLD_MIN = 3'b100;
+parameter LOAD_LEAK_CYCLES_1 = 3'b101;
+parameter LOAD_LEAK_CYCLES_2 = 3'b110;
+parameter READY = 3'b111;
 
-// EXPANDED INTERNAL REGISTERS
+// Internal registers
 reg [7:0] shift_reg;
 reg [2:0] bit_count;
-reg [3:0] current_state;  // Expanded to 4 bits for more states
-reg [7:0] checksum;       // Parameter validation
-reg [4:0] load_counter;   // Load cycle counter
+reg [2:0] current_state;
+reg [2:0] next_state;
 
-// Edge detection
-reg load_enable_prev;
-wire load_enable_rising = load_enable & ~load_enable_prev;
+// Default parameter values
+parameter DEFAULT_WA = 3'd2;               // Default weight A
+parameter DEFAULT_LEAK_RATE_1 = 8'd2;      // Default primary leak rate
+parameter DEFAULT_LEAK_RATE_2 = 8'd1;      // Default secondary leak rate
+parameter DEFAULT_THRESHOLD_MIN = 8'd30;   // Default min threshold
+parameter DEFAULT_LEAK_CYCLES_1 = 4'd2;    // Default primary leak cycles
+parameter DEFAULT_LEAK_CYCLES_2 = 4'd4;    // Default secondary leak cycles
 
-// ENHANCED DEFAULT PARAMETERS with validation
-parameter DEFAULT_WA = 3'd3;        // Non-zero default
-parameter DEFAULT_WB = 3'd3;        
-parameter DEFAULT_LEAK = 2'd1;      
-parameter DEFAULT_THR_MIN = 8'd25;  // Reasonable range
-parameter DEFAULT_THR_MAX = 8'd85;  
-parameter CHECKSUM_SEED = 8'hA5;    // Validation seed
-
-always @(posedge clk) begin
-    if (reset) begin
-        load_enable_prev <= 1'b0;
-    end else begin
-        load_enable_prev <= load_enable;
-    end
+// Sequential state transitions
+always @(*) begin
+    case (current_state)
+        LOAD_WA: next_state = LOAD_LEAK_RATE_1;
+        LOAD_LEAK_RATE_1: next_state = LOAD_LEAK_RATE_2;
+        LOAD_LEAK_RATE_2: next_state = LOAD_THRESHOLD_MIN;
+        LOAD_THRESHOLD_MIN: next_state = LOAD_LEAK_CYCLES_1;
+        LOAD_LEAK_CYCLES_1: next_state = LOAD_LEAK_CYCLES_2;
+        LOAD_LEAK_CYCLES_2: next_state = READY;
+        default: next_state = IDLE;
+    endcase
 end
 
-// CRITICAL FIX: Ensure params_ready is NOT constant
+// State machine and serial loading logic
 always @(posedge clk) begin
     if (reset) begin
         current_state <= IDLE;
         shift_reg <= 8'd0;
         bit_count <= 3'd0;
-        checksum <= CHECKSUM_SEED;
-        load_counter <= 5'd0;
         weight_a <= DEFAULT_WA;
-        weight_b <= DEFAULT_WB;
-        leak_config <= DEFAULT_LEAK;
-        threshold_min <= DEFAULT_THR_MIN;
-        threshold_max <= DEFAULT_THR_MAX;
-        params_ready <= 1'b1;  // CRITICAL: Start ready with defaults - NOT CONSTANT!
-        
+        leak_rate_1 <= DEFAULT_LEAK_RATE_1;
+        leak_rate_2 <= DEFAULT_LEAK_RATE_2;
+        threshold_min <= DEFAULT_THRESHOLD_MIN;
+        leak_cycles_1 <= DEFAULT_LEAK_CYCLES_1;
+        leak_cycles_2 <= DEFAULT_LEAK_CYCLES_2;
+        params_ready <= 1'b1;
     end else if (enable) begin
         case (current_state)
             IDLE: begin
-                if (load_enable_rising) begin
+                if (load_enable) begin
                     current_state <= LOAD_WA;
                     bit_count <= 3'd0;
                     shift_reg <= 8'd0;
-                    checksum <= CHECKSUM_SEED;
-                    load_counter <= load_counter + 1;
-                    params_ready <= 1'b0;  // CRITICAL: Goes to 0 when loading starts
+                    params_ready <= 1'b0;
                 end
             end
             
@@ -87,131 +85,99 @@ always @(posedge clk) begin
                 if (load_enable) begin
                     shift_reg <= {shift_reg[6:0], serial_data_in};
                     bit_count <= bit_count + 1;
-                    checksum <= checksum ^ {7'd0, serial_data_in}; // Running checksum
-                    
                     if (bit_count == 3'd7) begin
-                        // Enhanced validation - ensure non-zero
-                        if (shift_reg[2:0] != 3'd0) 
-                            weight_a <= shift_reg[2:0];
-                        else
-                            weight_a <= 3'd1; // Minimum weight
-                        current_state <= LOAD_WB;
+                        weight_a <= {shift_reg[1:0], serial_data_in};
+                        current_state <= next_state;
                         bit_count <= 3'd0;
                         shift_reg <= 8'd0;
                     end
+                end else begin
+                    current_state <= IDLE;
+                    params_ready <= 1'b1;
                 end
             end
             
-            LOAD_WB: begin
+            LOAD_LEAK_RATE_1: begin
                 if (load_enable) begin
                     shift_reg <= {shift_reg[6:0], serial_data_in};
                     bit_count <= bit_count + 1;
-                    checksum <= checksum ^ {7'd0, serial_data_in};
-                    
                     if (bit_count == 3'd7) begin
-                        if (shift_reg[2:0] != 3'd0)
-                            weight_b <= shift_reg[2:0];
-                        else
-                            weight_b <= 3'd1;
-                        current_state <= LOAD_LEAK;
+                        leak_rate_1 <= {shift_reg[6:0], serial_data_in};
+                        current_state <= next_state;
                         bit_count <= 3'd0;
                         shift_reg <= 8'd0;
                     end
+                end else begin
+                    current_state <= IDLE;
+                    params_ready <= 1'b1;
                 end
             end
             
-            LOAD_LEAK: begin
+            LOAD_LEAK_RATE_2: begin
                 if (load_enable) begin
                     shift_reg <= {shift_reg[6:0], serial_data_in};
                     bit_count <= bit_count + 1;
-                    checksum <= checksum ^ {7'd0, serial_data_in};
-                    
                     if (bit_count == 3'd7) begin
-                        leak_config <= shift_reg[1:0];
-                        current_state <= LOAD_THR_MIN;
+                        leak_rate_2 <= {shift_reg[6:0], serial_data_in};
+                        current_state <= next_state;
                         bit_count <= 3'd0;
                         shift_reg <= 8'd0;
                     end
+                end else begin
+                    current_state <= IDLE;
+                    params_ready <= 1'b1;
                 end
             end
             
-            LOAD_THR_MIN: begin
+            LOAD_THRESHOLD_MIN: begin
                 if (load_enable) begin
                     shift_reg <= {shift_reg[6:0], serial_data_in};
                     bit_count <= bit_count + 1;
-                    checksum <= checksum ^ {7'd0, serial_data_in};
-                    
                     if (bit_count == 3'd7) begin
-                        // Enhanced validation - ensure reasonable range
-                        if (shift_reg >= 8'd10 && shift_reg <= 8'd100)
-                            threshold_min <= shift_reg;
-                        else
-                            threshold_min <= DEFAULT_THR_MIN;
-                        current_state <= LOAD_THR_MAX;
+                        threshold_min <= {shift_reg[6:0], serial_data_in};
+                        current_state <= next_state;
                         bit_count <= 3'd0;
                         shift_reg <= 8'd0;
                     end
+                end else begin
+                    current_state <= IDLE;
+                    params_ready <= 1'b1;
                 end
             end
             
-            LOAD_THR_MAX: begin
+            LOAD_LEAK_CYCLES_1: begin
                 if (load_enable) begin
                     shift_reg <= {shift_reg[6:0], serial_data_in};
                     bit_count <= bit_count + 1;
-                    checksum <= checksum ^ {7'd0, serial_data_in};
-                    
                     if (bit_count == 3'd7) begin
-                        // Ensure max > min with margin
-                        if (shift_reg > threshold_min + 8'd10 && shift_reg <= 8'd200)
-                            threshold_max <= shift_reg;
-                        else
-                            threshold_max <= threshold_min + 8'd30;
-                        current_state <= LOAD_EXTRA1;
+                        leak_cycles_1 <= {shift_reg[2:0], serial_data_in};
+                        current_state <= next_state;
                         bit_count <= 3'd0;
                         shift_reg <= 8'd0;
                     end
+                end else begin
+                    current_state <= IDLE;
+                    params_ready <= 1'b1;
                 end
             end
             
-            // Additional parameter loading states for future expansion
-            LOAD_EXTRA1: begin
+            LOAD_LEAK_CYCLES_2: begin
                 if (load_enable) begin
                     shift_reg <= {shift_reg[6:0], serial_data_in};
                     bit_count <= bit_count + 1;
-                    checksum <= checksum ^ {7'd0, serial_data_in};
-                    
                     if (bit_count == 3'd7) begin
-                        // Reserved for future parameters
-                        current_state <= LOAD_EXTRA2;
-                        bit_count <= 3'd0;
-                        shift_reg <= 8'd0;
-                    end
-                end
-            end
-            
-            LOAD_EXTRA2: begin
-                if (load_enable) begin
-                    shift_reg <= {shift_reg[6:0], serial_data_in};
-                    bit_count <= bit_count + 1;
-                    checksum <= checksum ^ {7'd0, serial_data_in};
-                    
-                    if (bit_count == 3'd7) begin
-                        // Checksum validation (simple but functional)
+                        leak_cycles_2 <= {shift_reg[2:0], serial_data_in};
                         current_state <= READY;
-                        // CRITICAL: params_ready changes based on checksum - NOT CONSTANT!
-                        params_ready <= (checksum[3:0] != 4'd0) ? 1'b1 : 1'b1; // Always pass for now
+                        params_ready <= 1'b1;
                     end
+                end else begin
+                    current_state <= IDLE;
+                    params_ready <= 1'b1;
                 end
             end
             
             READY: begin
-                if (load_enable_rising) begin
-                    current_state <= LOAD_WA;
-                    bit_count <= 3'd0;
-                    shift_reg <= 8'd0;
-                    checksum <= CHECKSUM_SEED;
-                    params_ready <= 1'b0;  // CRITICAL: Toggle params_ready
-                end else if (!load_enable) begin
+                if (!load_enable) begin
                     current_state <= IDLE;
                 end
             end
@@ -224,3 +190,4 @@ always @(posedge clk) begin
 end
 
 endmodule
+
